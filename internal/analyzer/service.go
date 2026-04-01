@@ -9,18 +9,20 @@ import (
 	"poolwatch/internal/config"
 	"poolwatch/internal/domain"
 	"poolwatch/internal/events"
+	"poolwatch/internal/persistence"
 	"poolwatch/internal/store"
 )
 
 type Service struct {
-	cfg    config.Config
-	logger *slog.Logger
-	queue  *events.Queue
-	state  *store.State
+	cfg     config.Config
+	logger  *slog.Logger
+	queue   *events.Queue
+	state   *store.State
+	history persistence.Store
 }
 
-func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State) *Service {
-	return &Service{cfg: cfg, logger: logger, queue: queue, state: state}
+func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, history persistence.Store) *Service {
+	return &Service{cfg: cfg, logger: logger, queue: queue, state: state, history: history}
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -33,9 +35,13 @@ func (s *Service) Run(ctx context.Context) error {
 			if event.Snapshot == nil {
 				continue
 			}
-			for _, alert := range s.analyzeSnapshot(*event.Snapshot) {
+			alerts := s.analyzeSnapshot(*event.Snapshot)
+			for _, alert := range alerts {
 				s.state.AddAlert(alert, s.cfg.HistoryLimit)
 				s.logger.Warn("alert", "code", alert.Code, "message", alert.Message, "severity", alert.Severity)
+			}
+			if err := s.history.SaveAlerts(ctx, alerts); err != nil {
+				s.logger.Warn("persist alerts", "error", err)
 			}
 		}
 	}

@@ -6,28 +6,33 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"poolwatch/internal/config"
+	"poolwatch/internal/domain"
+	"poolwatch/internal/persistence"
 	"poolwatch/internal/proxy"
 	"poolwatch/internal/store"
 )
 
 type Server struct {
-	cfg    config.Config
-	logger *slog.Logger
-	state  *store.State
-	proxy  *proxy.Service
-	server *http.Server
+	cfg     config.Config
+	logger  *slog.Logger
+	state   *store.State
+	history persistence.Store
+	proxy   *proxy.Service
+	server  *http.Server
 }
 
-func New(cfg config.Config, logger *slog.Logger, state *store.State, proxyService *proxy.Service) *Server {
+func New(cfg config.Config, logger *slog.Logger, state *store.State, history persistence.Store, proxyService *proxy.Service) *Server {
 	mux := http.NewServeMux()
 	service := &Server{
-		cfg:    cfg,
-		logger: logger,
-		state:  state,
-		proxy:  proxyService,
+		cfg:     cfg,
+		logger:  logger,
+		state:   state,
+		history: history,
+		proxy:   proxyService,
 		server: &http.Server{
 			Addr:              cfg.HTTPAddr,
 			Handler:           mux,
@@ -40,6 +45,9 @@ func New(cfg config.Config, logger *slog.Logger, state *store.State, proxyServic
 	mux.HandleFunc("/api/v1/metrics", service.metrics)
 	mux.HandleFunc("/api/v1/alerts", service.alerts)
 	mux.HandleFunc("/api/v1/status", service.status)
+	mux.HandleFunc("/api/v1/history", service.historyFeed)
+	mux.HandleFunc("/api/v1/series", service.series)
+	mux.HandleFunc("/api/v1/dashboard", service.dashboardData)
 	mux.HandleFunc("/api/v1/proxy/enable", service.enableProxy)
 	mux.HandleFunc("/api/v1/proxy/disable", service.disableProxy)
 
@@ -73,9 +81,79 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.state.Snapshot())
 }
 
-func (s *Server) alerts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("window") == "" && r.URL.Query().Get("limit") == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"alerts": s.state.Alerts(),
+		})
+		return
+	}
+
+	query, err := parseHistoryQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	alerts, err := s.history.ListAlerts(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(alerts) == 0 {
+		alerts = s.state.Alerts()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"alerts": s.state.Alerts(),
+		"window": query.Window.String(),
+		"limit":  query.Limit,
+		"alerts": alerts,
+	})
+}
+
+func (s *Server) historyFeed(w http.ResponseWriter, r *http.Request) {
+	query, err := parseHistoryQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	snapshots, err := s.history.ListSnapshots(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(snapshots) == 0 {
+		snapshots = s.state.History()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window":    query.Window.String(),
+		"limit":     query.Limit,
+		"snapshots": snapshots,
+	})
+}
+
+func (s *Server) series(w http.ResponseWriter, r *http.Request) {
+	query, err := parseHistoryQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	points, err := s.history.ListTimeSeries(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(points) == 0 {
+		points = buildSeriesFromSnapshots(s.state.History())
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window": query.Window.String(),
+		"limit":  query.Limit,
+		"points": points,
 	})
 }
 
@@ -88,9 +166,46 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 			"proxy_upstream":   s.cfg.ProxyUpstreamAddr,
 			"collect_interval": s.cfg.CollectInterval.String(),
 			"analyze_interval": s.cfg.AnalyzeInterval.String(),
+			"mongodb_enabled":  s.cfg.MongoDBURI != "",
+			"mongodb_database": s.cfg.MongoDBDatabase,
 		},
 		"state": s.state.Status(),
 	})
+}
+
+func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
+	query, err := parseHistoryQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	snapshot := s.state.Snapshot()
+	points, err := s.history.ListTimeSeries(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(points) == 0 {
+		points = buildSeriesFromSnapshots(s.state.History())
+	}
+
+	alerts, err := s.history.ListAlerts(r.Context(), persistence.HistoryQuery{
+		Window: query.Window,
+		Limit:  minInt64(query.Limit, 50),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if len(alerts) == 0 {
+		alerts = s.state.Alerts()
+		if len(alerts) > 50 {
+			alerts = alerts[len(alerts)-50:]
+		}
+	}
+
+	writeJSON(w, http.StatusOK, buildDashboardPayload(s.cfg, snapshot, points, alerts))
 }
 
 func (s *Server) enableProxy(w http.ResponseWriter, r *http.Request) {
@@ -193,4 +308,92 @@ func writeJSON(w http.ResponseWriter, code int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func parseHistoryQuery(r *http.Request) (persistence.HistoryQuery, error) {
+	query := persistence.HistoryQuery{
+		Window: 15 * time.Minute,
+		Limit:  300,
+	}
+
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		window, err := time.ParseDuration(raw)
+		if err != nil {
+			return persistence.HistoryQuery{}, fmt.Errorf("invalid window %q", raw)
+		}
+		query.Window = window
+	}
+
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return persistence.HistoryQuery{}, fmt.Errorf("invalid limit %q", raw)
+		}
+		query.Limit = limit
+	}
+
+	return query, nil
+}
+
+func buildSeriesFromSnapshots(snapshots []domain.Snapshot) []persistence.TimePoint {
+	points := make([]persistence.TimePoint, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		points = append(points, persistence.TimePoint{
+			Timestamp:            snapshot.Timestamp,
+			PoolUsage:            snapshot.Derived.PoolUsage,
+			WaitP95MS:            float64(snapshot.Derived.WaitP95.Microseconds()) / 1000,
+			WaitingClients:       snapshot.PgBouncer.WaitingClients + snapshot.Postgres.WaitingConnections,
+			ActiveConnections:    snapshot.Postgres.ActiveConnections + snapshot.PgBouncer.ActiveServers,
+			QueueGrowthPerSecond: snapshot.Derived.QueueGrowthPerSecond,
+			ProxyHealthy:         snapshot.Proxy.Healthy,
+		})
+	}
+	return points
+}
+
+func buildDashboardPayload(cfg config.Config, snapshot domain.Snapshot, points []persistence.TimePoint, alerts []domain.Alert) domain.DashboardData {
+	series := make([]domain.DashboardPoint, 0, len(points))
+	for _, point := range points {
+		series = append(series, domain.DashboardPoint{
+			Timestamp:            point.Timestamp.Format(time.RFC3339),
+			PoolUsagePercent:     point.PoolUsage * 100,
+			WaitP95MS:            point.WaitP95MS,
+			WaitingClients:       point.WaitingClients,
+			ActiveConnections:    point.ActiveConnections,
+			QueueGrowthPerSecond: point.QueueGrowthPerSecond,
+			ProxyHealthy:         point.ProxyHealthy,
+		})
+	}
+
+	return domain.DashboardData{
+		Status: domain.DashboardStatus{
+			Mode:            string(cfg.Mode),
+			ProxyEnabled:    snapshot.Proxy.Enabled,
+			ProxyHealthy:    snapshot.Proxy.Healthy,
+			MongoDBEnabled:  cfg.MongoDBURI != "",
+			LastCollectedAt: snapshot.Timestamp.Format(time.RFC3339),
+		},
+		Summary: domain.DashboardKPI{
+			PoolUsagePercent:     snapshot.Derived.PoolUsage * 100,
+			WaitP95MS:            float64(snapshot.Derived.WaitP95.Microseconds()) / 1000,
+			WaitingClients:       snapshot.PgBouncer.WaitingClients + snapshot.Postgres.WaitingConnections,
+			ActiveConnections:    snapshot.Postgres.ActiveConnections + snapshot.PgBouncer.ActiveServers,
+			QueueGrowthPerSecond: snapshot.Derived.QueueGrowthPerSecond,
+			ExhaustionSeconds:    snapshot.Derived.ExhaustionSeconds,
+		},
+		Series: series,
+		Alerts: alerts,
+		Tables: domain.DashboardTables{
+			QueryHogs:      snapshot.Postgres.QueryHogs,
+			LeakCandidates: snapshot.Postgres.LeakCandidates,
+			TopStatements:  snapshot.Postgres.TopStatements,
+		},
+	}
+}
+
+func minInt64(value, cap int64) int64 {
+	if value <= 0 || value > cap {
+		return cap
+	}
+	return value
 }

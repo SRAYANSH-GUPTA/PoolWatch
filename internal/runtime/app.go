@@ -3,12 +3,14 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"poolwatch/internal/analyzer"
 	"poolwatch/internal/api"
 	"poolwatch/internal/collector"
 	"poolwatch/internal/config"
 	"poolwatch/internal/events"
+	"poolwatch/internal/persistence"
 	"poolwatch/internal/proxy"
 	"poolwatch/internal/store"
 )
@@ -20,18 +22,29 @@ type App struct {
 	analyzer  *analyzer.Service
 	api       *api.Server
 	proxy     *proxy.Service
+	history   persistence.Store
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	state := store.New(cfg.HistoryLimit)
 	queue := events.New(cfg.EventQueueSize)
+	history := persistence.NewNoop()
+	if cfg.MongoDBURI != "" {
+		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		mongoStore, err := persistence.NewMongo(connectCtx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		history = mongoStore
+	}
 	proxyService := proxy.New(cfg, logger, queue, state)
-	collectorService, err := collector.New(cfg, logger, queue, state, proxyService)
+	collectorService, err := collector.New(cfg, logger, queue, state, history, proxyService)
 	if err != nil {
 		return nil, err
 	}
-	analyzerService := analyzer.New(cfg, logger, queue, state)
-	apiServer := api.New(cfg, logger, state, proxyService)
+	analyzerService := analyzer.New(cfg, logger, queue, state, history)
+	apiServer := api.New(cfg, logger, state, history, proxyService)
 
 	return &App{
 		cfg:       cfg,
@@ -40,12 +53,18 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		analyzer:  analyzerService,
 		api:       apiServer,
 		proxy:     proxyService,
+		history:   history,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		_ = a.history.Close(closeCtx)
+	}()
 
 	errCh := make(chan error, 4)
 

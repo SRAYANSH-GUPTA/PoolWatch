@@ -13,6 +13,7 @@ import (
 	"poolwatch/internal/config"
 	"poolwatch/internal/domain"
 	"poolwatch/internal/events"
+	"poolwatch/internal/persistence"
 	"poolwatch/internal/proxy"
 	"poolwatch/internal/store"
 )
@@ -22,18 +23,20 @@ type Service struct {
 	logger   *slog.Logger
 	queue    *events.Queue
 	state    *store.State
+	history  persistence.Store
 	proxy    *proxy.Service
 	postgres *sql.DB
 	pgb      *sql.DB
 }
 
-func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, proxyService *proxy.Service) (*Service, error) {
+func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, history persistence.Store, proxyService *proxy.Service) (*Service, error) {
 	service := &Service{
-		cfg:    cfg,
-		logger: logger,
-		queue:  queue,
-		state:  state,
-		proxy:  proxyService,
+		cfg:     cfg,
+		logger:  logger,
+		queue:   queue,
+		state:   state,
+		history: history,
+		proxy:   proxyService,
 	}
 
 	if cfg.PostgresDSN != "" {
@@ -130,6 +133,9 @@ func (s *Service) collectOnce(ctx context.Context) error {
 	s.state.UpdateSnapshot(snapshot, s.cfg.HistoryLimit)
 	s.state.SetQueue(s.queue.Len(), s.queue.Dropped())
 	s.state.SetProxyStatus(snapshot.Proxy.Enabled, snapshot.Proxy.Healthy)
+	if err := s.history.SaveSnapshot(ctx, snapshot); err != nil {
+		s.logger.Warn("persist snapshot", "error", err)
+	}
 	s.queue.Publish(domain.Event{
 		Type:      "snapshot",
 		Timestamp: snapshot.Timestamp,

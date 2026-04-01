@@ -54,6 +54,9 @@ Use PoolWatch as an external telemetry source for your backend services:
 - `GET /api/v1/metrics` Latest snapshot
 - `GET /api/v1/alerts` Current alert list
 - `GET /api/v1/status` Runtime config + state
+- `GET /api/v1/history?window=15m&limit=300` Snapshot history for charts
+- `GET /api/v1/series?window=15m&limit=300` Compact time-series feed for dashboards
+- `GET /api/v1/dashboard?window=15m&limit=180` Frontend-oriented dashboard payload
 - `POST /api/v1/proxy/enable` Enable guarded proxy mode
 - `POST /api/v1/proxy/disable` Disable guarded proxy mode
 
@@ -77,6 +80,9 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/api/v1/status
 curl http://localhost:8080/api/v1/metrics
 curl http://localhost:8080/api/v1/alerts
+curl 'http://localhost:8080/api/v1/history?window=15m&limit=120'
+curl 'http://localhost:8080/api/v1/series?window=15m&limit=120'
+curl 'http://localhost:8080/api/v1/dashboard?window=15m&limit=120'
 ```
 
 ### 3) Run with Docker
@@ -156,33 +162,87 @@ async function fetchPoolStatus() {
 
 ## Configuration
 
-Environment variables (see `.env.example` for defaults):
+See the annotated `.env.example` for defaults and inline explanations.
 
-- `POOLWATCH_MODE`
-- `POOLWATCH_HTTP_ADDR`
-- `POOLWATCH_PROXY_LISTEN_ADDR`
-- `POOLWATCH_PROXY_UPSTREAM_ADDR`
-- `POOLWATCH_POSTGRES_DSN`
-- `POOLWATCH_PGBOUNCER_DSN`
-- `POOLWATCH_COLLECT_INTERVAL`
-- `POOLWATCH_ANALYZE_INTERVAL`
-- `POOLWATCH_EVENT_QUEUE_SIZE`
-- `POOLWATCH_HISTORY_LIMIT`
-- `POOLWATCH_POOL_USAGE_THRESHOLD`
-- `POOLWATCH_WAIT_P95_THRESHOLD`
-- `POOLWATCH_LONG_QUERY_THRESHOLD`
-- `POOLWATCH_LEAK_THRESHOLD`
-- `POOLWATCH_PROXY_LATENCY_LIMIT`
-- `POOLWATCH_PROXY_QUEUE_LIMIT`
-- `POOLWATCH_PROXY_CONNECTION_LIMIT`
-- `POOLWATCH_LOG_LEVEL`
+The variables are grouped into a few practical categories:
+
+- Runtime: `POOLWATCH_MODE`, `POOLWATCH_HTTP_ADDR`
+- Proxy wiring: `POOLWATCH_PROXY_LISTEN_ADDR`, `POOLWATCH_PROXY_UPSTREAM_ADDR`
+- Data sources: `POOLWATCH_POSTGRES_DSN`, `POOLWATCH_PGBOUNCER_DSN`
+- Persistence: `POOLWATCH_MONGODB_URI`, `POOLWATCH_MONGODB_DATABASE`, `POOLWATCH_MONGODB_SNAPSHOTS_COLLECTION`, `POOLWATCH_MONGODB_ALERTS_COLLECTION`, `POOLWATCH_MONGODB_RETENTION`
+- Sampling and buffering: `POOLWATCH_COLLECT_INTERVAL`, `POOLWATCH_ANALYZE_INTERVAL`, `POOLWATCH_EVENT_QUEUE_SIZE`, `POOLWATCH_HISTORY_LIMIT`
+- Alert thresholds: `POOLWATCH_POOL_USAGE_THRESHOLD`, `POOLWATCH_WAIT_P95_THRESHOLD`, `POOLWATCH_LONG_QUERY_THRESHOLD`, `POOLWATCH_LEAK_THRESHOLD`
+- Proxy safety guards: `POOLWATCH_PROXY_LATENCY_LIMIT`, `POOLWATCH_PROXY_QUEUE_LIMIT`, `POOLWATCH_PROXY_CONNECTION_LIMIT`
+- Logging: `POOLWATCH_LOG_LEVEL`
+
+Recommended starting point:
+
+- Keep `POOLWATCH_MODE=passive`
+- Set both PostgreSQL and pgBouncer DSNs
+- Leave MongoDB disabled until you need historical charts
+- Tune thresholds only after observing normal traffic baselines
 
 ## Production Notes
 
 - Run in `passive` mode first, then enable `assisted` once thresholds are tuned.
 - Keep DSNs least-privileged where possible.
+- If using MongoDB Atlas, whitelist your deployment IP or use VPC peering/private endpoints.
 - Start with conservative alert thresholds and adjust based on baseline traffic.
 - Prefer integrating alerts into your existing incident channel rather than creating a separate process.
+
+## MongoDB Atlas
+
+Set these env vars before starting PoolWatch:
+
+```bash
+export POOLWATCH_MONGODB_URI='mongodb+srv://<user>:<password>@<cluster-url>/'
+export POOLWATCH_MONGODB_DATABASE='poolwatch'
+export POOLWATCH_MONGODB_RETENTION='168h'
+```
+
+When MongoDB is configured, PoolWatch will:
+
+- persist every collected snapshot
+- persist every generated alert
+- expose historical chart data via `/api/v1/history`
+- expose compact graph points via `/api/v1/series`
+
+## Dashboard Endpoint
+
+The Flutter app can use a single request:
+
+```bash
+curl 'http://localhost:8080/api/v1/dashboard?window=15m&limit=180'
+```
+
+Response shape:
+
+```json
+{
+  "status": {
+    "mode": "passive",
+    "proxy_enabled": false,
+    "proxy_healthy": true,
+    "mongodb_enabled": true,
+    "last_collected_at": "2026-04-02T12:00:00Z"
+  },
+  "summary": {
+    "pool_usage_percent": 72.3,
+    "wait_p95_ms": 18.4,
+    "waiting_clients": 4,
+    "active_connections": 61,
+    "queue_growth_per_second": 0.3,
+    "exhaustion_seconds": 93
+  },
+  "series": [],
+  "alerts": [],
+  "tables": {
+    "query_hogs": [],
+    "leak_candidates": [],
+    "top_statements": []
+  }
+}
+```
 
 ## Roadmap Ideas
 

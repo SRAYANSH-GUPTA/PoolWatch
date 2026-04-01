@@ -24,6 +24,11 @@ type Config struct {
 	ProxyUpstreamAddr    string
 	PostgresDSN          string
 	PgBouncerDSN         string
+	MongoDBURI           string
+	MongoDBDatabase      string
+	MongoSnapshotsColl   string
+	MongoAlertsColl      string
+	MongoRetention       time.Duration
 	CollectInterval      time.Duration
 	AnalyzeInterval      time.Duration
 	EventQueueSize       int
@@ -46,6 +51,11 @@ func Load() (Config, error) {
 		ProxyUpstreamAddr:    env("POOLWATCH_PROXY_UPSTREAM_ADDR", "127.0.0.1:6432"),
 		PostgresDSN:          os.Getenv("POOLWATCH_POSTGRES_DSN"),
 		PgBouncerDSN:         os.Getenv("POOLWATCH_PGBOUNCER_DSN"),
+		MongoDBURI:           os.Getenv("POOLWATCH_MONGODB_URI"),
+		MongoDBDatabase:      env("POOLWATCH_MONGODB_DATABASE", "poolwatch"),
+		MongoSnapshotsColl:   env("POOLWATCH_MONGODB_SNAPSHOTS_COLLECTION", "snapshots"),
+		MongoAlertsColl:      env("POOLWATCH_MONGODB_ALERTS_COLLECTION", "alerts"),
+		MongoRetention:       durationEnv("POOLWATCH_MONGODB_RETENTION", 7*24*time.Hour),
 		CollectInterval:      durationEnv("POOLWATCH_COLLECT_INTERVAL", 2*time.Second),
 		AnalyzeInterval:      durationEnv("POOLWATCH_ANALYZE_INTERVAL", 5*time.Second),
 		EventQueueSize:       intEnv("POOLWATCH_EVENT_QUEUE_SIZE", 2048),
@@ -72,6 +82,10 @@ func Load() (Config, error) {
 
 	if cfg.HistoryLimit < 10 {
 		return Config{}, fmt.Errorf("history limit must be at least 10")
+	}
+
+	if cfg.MongoDBURI != "" && cfg.MongoRetention < time.Hour {
+		return Config{}, fmt.Errorf("mongodb retention must be at least 1h")
 	}
 
 	return cfg, nil

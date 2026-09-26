@@ -10,6 +10,7 @@ import (
 	"poolwatch/internal/collector"
 	"poolwatch/internal/config"
 	"poolwatch/internal/events"
+	"poolwatch/internal/notify"
 	"poolwatch/internal/persistence"
 	"poolwatch/internal/proxy"
 	"poolwatch/internal/store"
@@ -23,6 +24,7 @@ type App struct {
 	api       *api.Server
 	proxy     *proxy.Service
 	history   persistence.Store
+	notifier  notify.Notifier
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -43,7 +45,8 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	analyzerService := analyzer.New(cfg, logger, queue, state, history)
+	notifier := notify.New(cfg, logger)
+	analyzerService := analyzer.New(cfg, logger, queue, state, history, notifier)
 	apiServer := api.New(cfg, logger, state, history, proxyService)
 
 	return &App{
@@ -54,6 +57,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		api:       apiServer,
 		proxy:     proxyService,
 		history:   history,
+		notifier:  notifier,
 	}, nil
 }
 
@@ -65,6 +69,7 @@ func (a *App) Run(ctx context.Context) error {
 		defer closeCancel()
 		_ = a.history.Close(closeCtx)
 	}()
+	defer a.notifier.Close()
 
 	errCh := make(chan error, 4)
 

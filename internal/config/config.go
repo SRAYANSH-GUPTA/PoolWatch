@@ -29,6 +29,7 @@ type Config struct {
 	MongoSnapshotsColl   string
 	MongoAlertsColl      string
 	MongoRetention       time.Duration
+	MongoMonitorURI      string
 	CollectInterval      time.Duration
 	AnalyzeInterval      time.Duration
 	EventQueueSize       int
@@ -41,6 +42,11 @@ type Config struct {
 	ProxyQueueLimit      int
 	ProxyConnectionLimit int
 	LogLevelValue        string
+	TrendWindow          time.Duration
+	TrendHorizon         time.Duration
+	AlertWebhookURL      string
+	AlertWebhookFormat   string
+	AlertCooldown        time.Duration
 }
 
 func Load() (Config, error) {
@@ -56,6 +62,7 @@ func Load() (Config, error) {
 		MongoSnapshotsColl:   env("POOLWATCH_MONGODB_SNAPSHOTS_COLLECTION", "snapshots"),
 		MongoAlertsColl:      env("POOLWATCH_MONGODB_ALERTS_COLLECTION", "alerts"),
 		MongoRetention:       durationEnv("POOLWATCH_MONGODB_RETENTION", 7*24*time.Hour),
+		MongoMonitorURI:      os.Getenv("POOLWATCH_MONGO_MONITOR_URI"),
 		CollectInterval:      durationEnv("POOLWATCH_COLLECT_INTERVAL", 2*time.Second),
 		AnalyzeInterval:      durationEnv("POOLWATCH_ANALYZE_INTERVAL", 5*time.Second),
 		EventQueueSize:       intEnv("POOLWATCH_EVENT_QUEUE_SIZE", 2048),
@@ -68,6 +75,21 @@ func Load() (Config, error) {
 		ProxyQueueLimit:      intEnv("POOLWATCH_PROXY_QUEUE_LIMIT", 4096),
 		ProxyConnectionLimit: intEnv("POOLWATCH_PROXY_CONNECTION_LIMIT", 10000),
 		LogLevelValue:        strings.ToLower(env("POOLWATCH_LOG_LEVEL", "info")),
+		TrendWindow:          durationEnv("POOLWATCH_TREND_WINDOW", 2*time.Minute),
+		TrendHorizon:         durationEnv("POOLWATCH_TREND_HORIZON", 5*time.Minute),
+		AlertWebhookURL:      strings.TrimSpace(os.Getenv("POOLWATCH_ALERT_WEBHOOK_URL")),
+		AlertWebhookFormat:   strings.ToLower(env("POOLWATCH_ALERT_WEBHOOK_FORMAT", "generic")),
+		AlertCooldown:        durationEnv("POOLWATCH_ALERT_COOLDOWN", time.Minute),
+	}
+
+	switch cfg.AlertWebhookFormat {
+	case "generic", "slack":
+	default:
+		return Config{}, fmt.Errorf("invalid alert webhook format %q (want generic or slack)", cfg.AlertWebhookFormat)
+	}
+
+	if cfg.AlertCooldown < 0 {
+		return Config{}, fmt.Errorf("alert cooldown must not be negative")
 	}
 
 	switch cfg.Mode {

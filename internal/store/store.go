@@ -15,6 +15,7 @@ type State struct {
 	droppedEvents uint64
 	proxyEnabled  bool
 	proxyHealthy  bool
+	alertCounts   map[string]uint64
 }
 
 func New(historyLimit int) *State {
@@ -41,6 +42,21 @@ func (s *State) AddAlert(alert domain.Alert, historyLimit int) {
 	if len(s.alerts) > historyLimit {
 		s.alerts = s.alerts[len(s.alerts)-historyLimit:]
 	}
+	if s.alertCounts == nil {
+		s.alertCounts = make(map[string]uint64)
+	}
+	s.alertCounts[alert.Code]++
+}
+
+// AlertCounts returns a copy of the monotonic per-code alert counters.
+func (s *State) AlertCounts() map[string]uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]uint64, len(s.alertCounts))
+	for code, count := range s.alertCounts {
+		result[code] = count
+	}
+	return result
 }
 
 func (s *State) SetQueue(depth int, dropped uint64) {

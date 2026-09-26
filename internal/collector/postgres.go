@@ -65,6 +65,7 @@ func (s *Service) collectPostgres(ctx context.Context) (domain.PostgresMetrics, 
 	result.QueryHogs, _ = s.collectQueryHogs(ctx)
 	result.LeakCandidates, _ = s.collectLeakCandidates(ctx)
 	result.TopStatements, _ = s.collectTopStatements(ctx)
+	result.AppConnections, _ = s.collectAppConnections(ctx, result.MaxConnections)
 
 	return result, rows.Err()
 }
@@ -167,6 +168,39 @@ func (s *Service) collectTopStatements(ctx context.Context) ([]domain.StatementM
 		item.Query = trimQuery(item.Query)
 		item.MeanExecTime = time.Duration(meanMs * float64(time.Millisecond))
 		item.TotalExecTime = time.Duration(totalMs * float64(time.Millisecond))
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Service) collectAppConnections(ctx context.Context, maxConnections int) ([]domain.AppConnectionStats, error) {
+	rows, err := s.postgres.QueryContext(ctx, `
+		select
+			coalesce(nullif(application_name, ''), 'unknown'),
+			coalesce(datname, ''),
+			count(*),
+			count(*) filter (where state = 'active'),
+			count(*) filter (where state like 'idle in transaction%')
+		from pg_stat_activity
+		where pid <> pg_backend_pid() and backend_type = 'client backend'
+		group by 1, 2
+		order by 3 desc
+		limit 20
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []domain.AppConnectionStats
+	for rows.Next() {
+		var item domain.AppConnectionStats
+		if err := rows.Scan(&item.Application, &item.Database, &item.Total, &item.Active, &item.IdleInTxn); err != nil {
+			return nil, err
+		}
+		if maxConnections > 0 {
+			item.Share = float64(item.Total) / float64(maxConnections)
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()

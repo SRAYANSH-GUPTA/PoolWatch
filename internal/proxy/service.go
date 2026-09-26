@@ -48,6 +48,7 @@ func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *sto
 
 func (s *Service) Run(ctx context.Context) error {
 	if s.cfg.Mode != config.ModeProxy {
+		<-ctx.Done()
 		return nil
 	}
 	return s.listen(ctx)

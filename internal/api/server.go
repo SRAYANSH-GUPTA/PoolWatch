@@ -42,6 +42,8 @@ func New(cfg config.Config, logger *slog.Logger, state *store.State, history per
 
 	mux.HandleFunc("/", service.dashboard)
 	mux.HandleFunc("/healthz", service.health)
+	mux.HandleFunc("GET /readyz", service.ready)
+	mux.HandleFunc("GET /metrics", service.prometheus)
 	mux.HandleFunc("/api/v1/metrics", service.metrics)
 	mux.HandleFunc("/api/v1/alerts", service.alerts)
 	mux.HandleFunc("/api/v1/status", service.status)

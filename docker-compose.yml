@@ -1,0 +1,110 @@
+name: poolwatch
+
+services:
+  postgres:
+    image: postgres:16
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - max_connections=50
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: "*"
+      LISTEN_PORT: "6432"
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "500"
+      DEFAULT_POOL_SIZE: "20"
+      # Lets the postgres user run SHOW POOLS / SHOW STATS on the `pgbouncer` admin db.
+      ADMIN_USERS: postgres
+      STATS_USERS: postgres
+    ports:
+      - "6432:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  poolwatch:
+    build: .
+    image: poolwatch:local
+    env_file: .env.example
+    environment:
+      POOLWATCH_MODE: assisted
+      POOLWATCH_HTTP_ADDR: ":8080"
+      POOLWATCH_PROXY_LISTEN_ADDR: ":6433"
+      POOLWATCH_PROXY_UPSTREAM_ADDR: pgbouncer:6432
+      POOLWATCH_POSTGRES_DSN: postgres://poolwatch:poolwatch@postgres:5432/postgres?sslmode=disable
+      POOLWATCH_PGBOUNCER_DSN: postgres://postgres:postgres@pgbouncer:6432/pgbouncer?sslmode=disable
+      POOLWATCH_MONGODB_URI: mongodb://mongo:27017
+      POOLWATCH_MONGO_MONITOR_URI: mongodb://mongo:27017
+    ports:
+      - "8080:8080"
+      - "6433:6433"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+    restart: unless-stopped
+
+  # Optional pool-pressure generator: `make load` / `docker compose --profile load up`.
+  load:
+    image: postgres:16
+    profiles: ["load"]
+    environment:
+      PGPASSWORD: postgres
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until pg_isready -h postgres -p 5432 -U postgres; do sleep 1; done
+        pgbench -i -s 10 -h postgres -p 5432 -U postgres postgres
+        while true; do
+          pgbench -h pgbouncer -p 6432 -U postgres -c 40 -j 4 -T 60 -P 10 -M simple postgres || sleep 5
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+
+volumes:
+  pgdata:
+  mongodata:

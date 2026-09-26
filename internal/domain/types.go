@@ -7,6 +7,7 @@ type Snapshot struct {
 	Postgres          PostgresMetrics    `json:"postgres"`
 	PgBouncer         PgBouncerMetrics   `json:"pgbouncer"`
 	Proxy             ProxyMetrics       `json:"proxy"`
+	Mongo             MongoMetrics       `json:"mongo"`
 	Derived           DerivedMetrics     `json:"derived"`
 	CollectorErrors   map[string]string  `json:"collector_errors,omitempty"`
 	SourceLatenciesMS map[string]float64 `json:"source_latencies_ms,omitempty"`
@@ -14,16 +15,27 @@ type Snapshot struct {
 }
 
 type PostgresMetrics struct {
-	MaxConnections     int                `json:"max_connections"`
-	ActiveConnections  int                `json:"active_connections"`
-	IdleConnections    int                `json:"idle_connections"`
-	IdleInTxn          int                `json:"idle_in_transaction"`
-	WaitingConnections int                `json:"waiting_connections"`
-	LongestTxn         time.Duration      `json:"longest_txn"`
-	LongestQuery       time.Duration      `json:"longest_query"`
-	QueryHogs          []QueryHog         `json:"query_hogs"`
-	LeakCandidates     []LeakCandidate    `json:"leak_candidates"`
-	TopStatements      []StatementMetrics `json:"top_statements"`
+	MaxConnections     int                  `json:"max_connections"`
+	ActiveConnections  int                  `json:"active_connections"`
+	IdleConnections    int                  `json:"idle_connections"`
+	IdleInTxn          int                  `json:"idle_in_transaction"`
+	WaitingConnections int                  `json:"waiting_connections"`
+	LongestTxn         time.Duration        `json:"longest_txn"`
+	LongestQuery       time.Duration        `json:"longest_query"`
+	QueryHogs          []QueryHog           `json:"query_hogs"`
+	LeakCandidates     []LeakCandidate      `json:"leak_candidates"`
+	TopStatements      []StatementMetrics   `json:"top_statements"`
+	AppConnections     []AppConnectionStats `json:"app_connections"`
+}
+
+// AppConnectionStats attributes PostgreSQL backends to the client application holding them.
+type AppConnectionStats struct {
+	Application string  `json:"application"`
+	Database    string  `json:"database"`
+	Total       int     `json:"total"`
+	Active      int     `json:"active"`
+	IdleInTxn   int     `json:"idle_in_txn"`
+	Share       float64 `json:"share"`
 }
 
 type PgBouncerMetrics struct {
@@ -87,6 +99,28 @@ type ProxyMetrics struct {
 	EgressBytes         int64         `json:"egress_bytes"`
 	P95SessionLatency   time.Duration `json:"p95_session_latency"`
 	LastError           string        `json:"last_error,omitempty"`
+}
+
+type MongoMetrics struct {
+	CurrentConnections   int64         `json:"current_connections"`
+	AvailableConnections int64         `json:"available_connections"`
+	ActiveConnections    int64         `json:"active_connections"`
+	TotalCreated         int64         `json:"total_created"`
+	PoolUsage            float64       `json:"pool_usage"`
+	CheckedOut           int64         `json:"checked_out"`
+	CheckOutFailures     int64         `json:"checkout_failures"`
+	AvgCheckoutWait      time.Duration `json:"avg_checkout_wait"`
+	MaxCheckoutWait      time.Duration `json:"max_checkout_wait"`
+	SlowOps              []MongoSlowOp `json:"slow_ops"`
+}
+
+type MongoSlowOp struct {
+	OpID      any           `json:"op_id"`
+	Namespace string        `json:"namespace"`
+	Op        string        `json:"op"`
+	Duration  time.Duration `json:"duration"`
+	Client    string        `json:"client"`
+	Desc      string        `json:"desc"`
 }
 
 type DerivedMetrics struct {

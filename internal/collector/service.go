@@ -27,6 +27,7 @@ type Service struct {
 	proxy    *proxy.Service
 	postgres *sql.DB
 	pgb      *sql.DB
+	mongo    *mongoMonitor
 }
 
 func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, history persistence.Store, proxyService *proxy.Service) (*Service, error) {
@@ -61,6 +62,16 @@ func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *sto
 		service.pgb = db
 	}
 
+	if cfg.MongoMonitorURI != "" {
+		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		monitor, err := newMongoMonitor(connectCtx, cfg.MongoMonitorURI)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		service.mongo = monitor
+	}
+
 	return service, nil
 }
 
@@ -91,6 +102,11 @@ func (s *Service) close() {
 	}
 	if s.pgb != nil {
 		_ = s.pgb.Close()
+	}
+	if s.mongo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.mongo.client.Disconnect(ctx)
+		cancel()
 	}
 }
 
@@ -125,6 +141,17 @@ func (s *Service) collectOnce(ctx context.Context) error {
 		}
 	} else {
 		snapshot.CollectorErrors["pgbouncer"] = "pgbouncer dsn not configured"
+	}
+
+	if s.mongo != nil {
+		start := time.Now()
+		metrics, err := s.collectMongo(ctx)
+		snapshot.SourceLatenciesMS["mongo"] = float64(time.Since(start).Microseconds()) / 1000
+		if err != nil {
+			snapshot.CollectorErrors["mongo"] = err.Error()
+		} else {
+			snapshot.Mongo = metrics
+		}
 	}
 
 	snapshot.Proxy = s.proxy.Metrics()

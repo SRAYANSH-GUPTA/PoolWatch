@@ -9,20 +9,34 @@ import (
 	"poolwatch/internal/config"
 	"poolwatch/internal/domain"
 	"poolwatch/internal/events"
+	"poolwatch/internal/notify"
 	"poolwatch/internal/persistence"
 	"poolwatch/internal/store"
 )
 
 type Service struct {
-	cfg     config.Config
-	logger  *slog.Logger
-	queue   *events.Queue
-	state   *store.State
-	history persistence.Store
+	cfg      config.Config
+	logger   *slog.Logger
+	queue    *events.Queue
+	state    *store.State
+	history  persistence.Store
+	notifier notify.Notifier
+	dedup    *deduper
 }
 
-func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, history persistence.Store) *Service {
-	return &Service{cfg: cfg, logger: logger, queue: queue, state: state, history: history}
+func New(cfg config.Config, logger *slog.Logger, queue *events.Queue, state *store.State, history persistence.Store, notifier notify.Notifier) *Service {
+	if notifier == nil {
+		notifier = notify.Noop{}
+	}
+	return &Service{
+		cfg:      cfg,
+		logger:   logger,
+		queue:    queue,
+		state:    state,
+		history:  history,
+		notifier: notifier,
+		dedup:    newDeduper(cfg.AlertCooldown),
+	}
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -35,7 +49,10 @@ func (s *Service) Run(ctx context.Context) error {
 			if event.Snapshot == nil {
 				continue
 			}
-			alerts := s.analyzeSnapshot(*event.Snapshot)
+			alerts := s.dedup.filter(s.analyzeSnapshot(*event.Snapshot), time.Now())
+			if len(alerts) == 0 {
+				continue
+			}
 			for _, alert := range alerts {
 				s.state.AddAlert(alert, s.cfg.HistoryLimit)
 				s.logger.Warn("alert", "code", alert.Code, "message", alert.Message, "severity", alert.Severity)
@@ -43,6 +60,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if err := s.history.SaveAlerts(ctx, alerts); err != nil {
 				s.logger.Warn("persist alerts", "error", err)
 			}
+			s.notifier.Notify(ctx, alerts)
 		}
 	}
 }
@@ -86,6 +104,8 @@ func (s *Service) analyzeSnapshot(snapshot domain.Snapshot) []domain.Alert {
 			},
 		})
 	}
+
+	alerts = append(alerts, s.trendAlerts(snapshot)...)
 
 	if len(snapshot.Postgres.QueryHogs) > 0 {
 		hog := snapshot.Postgres.QueryHogs[0]
@@ -151,6 +171,74 @@ func (s *Service) analyzeSnapshot(snapshot domain.Snapshot) []domain.Alert {
 				"last_error": snapshot.Proxy.LastError,
 			},
 		})
+	}
+
+	if snapshot.Mongo.PoolUsage >= s.cfg.PoolUsageThreshold && snapshot.Mongo.CurrentConnections > 0 {
+		alerts = append(alerts, domain.Alert{
+			Timestamp: snapshot.Timestamp,
+			Severity:  domain.SeverityWarn,
+			Code:      "mongo_pool_usage_high",
+			Message:   fmt.Sprintf("mongo connection usage at %.0f%%", snapshot.Mongo.PoolUsage*100),
+			Details: map[string]any{
+				"current":   snapshot.Mongo.CurrentConnections,
+				"available": snapshot.Mongo.AvailableConnections,
+				"active":    snapshot.Mongo.ActiveConnections,
+			},
+		})
+	}
+
+	if snapshot.Mongo.CheckOutFailures > 0 {
+		alerts = append(alerts, domain.Alert{
+			Timestamp: snapshot.Timestamp,
+			Severity:  domain.SeverityError,
+			Code:      "mongo_checkout_failures",
+			Message:   fmt.Sprintf("%d mongo connection checkouts failed", snapshot.Mongo.CheckOutFailures),
+			Details: map[string]any{
+				"failures":          snapshot.Mongo.CheckOutFailures,
+				"max_checkout_wait": snapshot.Mongo.MaxCheckoutWait.String(),
+				"checked_out":       snapshot.Mongo.CheckedOut,
+			},
+		})
+	}
+
+	if len(snapshot.Mongo.SlowOps) > 0 {
+		op := snapshot.Mongo.SlowOps[0]
+		alerts = append(alerts, domain.Alert{
+			Timestamp: snapshot.Timestamp,
+			Severity:  domain.SeverityWarn,
+			Code:      "mongo_slow_operation",
+			Message:   fmt.Sprintf("mongo %s on %s running for %s", op.Op, op.Namespace, op.Duration.Round(time.Millisecond)),
+			Details: map[string]any{
+				"op_id":     op.OpID,
+				"namespace": op.Namespace,
+				"client":    op.Client,
+				"desc":      op.Desc,
+				"slow_ops":  len(snapshot.Mongo.SlowOps),
+			},
+		})
+	}
+
+	if pg := snapshot.Postgres; pg.MaxConnections > 0 && len(pg.AppConnections) > 0 {
+		top := pg.AppConnections[0]
+		for _, app := range pg.AppConnections[1:] {
+			if app.Share > top.Share {
+				top = app
+			}
+		}
+		if top.Share >= 0.5 {
+			alerts = append(alerts, domain.Alert{
+				Timestamp: snapshot.Timestamp,
+				Severity:  domain.SeverityWarn,
+				Code:      "app_connection_hog",
+				Message:   fmt.Sprintf("application %s holds %.0f%% of postgres max_connections on %s", top.Application, top.Share*100, top.Database),
+				Details: map[string]any{
+					"application": top.Application,
+					"database":    top.Database,
+					"connections": top.Total,
+					"share":       top.Share,
+				},
+			})
+		}
 	}
 
 	return alerts
